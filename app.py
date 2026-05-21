@@ -1,770 +1,912 @@
 # =============================================================================
-#  NEXUS SCOUT  —  Universal AI Personal Shopper
+#  NEXUS SCOUT  —  Universal AI Personal Shopper  (Premium UI v2)
 #  File    : app.py
 #  Run     : streamlit run app.py
-#  Deploy  : push to GitHub, connect repo on share.streamlit.io — done.
+#  Deploy  : push to GitHub → connect on share.streamlit.io
+#  Deps    : pip install streamlit          (nothing else needed)
 #
-#  Dependencies (all standard — no API keys required to run):
-#    pip install streamlit
+#  v2 changes over v1
+#  ───────────────────
+#  • Smart suggestion chips — 6 clickable buttons that populate the search
+#    bar AND fire the search immediately via session state + st.rerun()
+#  • Region-aware URLs — eBay / Amazon / Google adapt to US / UK / EU / AU
+#  • SaaS sidebar — Filter Empty Listings toggle, Target Region dropdown,
+#    clean section headings, persistent search history panel
+#  • Equal-height 3-col cards — full CSS flexbox chain ensures the CTA
+#    button is always flush to the card bottom, no gap mismatches
+#  • CSS :has() button differentiation — chip row and Scout CTA get
+#    distinct styles without any JavaScript or hidden elements
+#  • All _estimate_price / build_search_url / Platform logic unchanged
 # =============================================================================
 
+from __future__ import annotations
+
 import hashlib
-import math
 import re
 import time
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import streamlit as st
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 0.  PAGE CONFIG  ← must be the first Streamlit call
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 0.  PAGE CONFIG  ← must be the very first Streamlit call
+# ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Nexus Scout",
-    page_icon="🔭",
-    layout="wide",
-    initial_sidebar_state="expanded",
+    page_title            = "Nexus Scout",
+    page_icon             = "🔭",
+    layout                = "wide",
+    initial_sidebar_state = "expanded",
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1.  GLOBAL CSS
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 1.  SESSION STATE  — initialised before any widget so chips can pre-fill
+#
+#  search_input : str   — the text currently shown in the search bar (widget key)
+#  do_search    : bool  — flag set by chip clicks or Scout button press
+#  last_query   : str   — last query that was fully executed (prevents re-fire)
+#  search_history: list — rolling list of past queries shown in sidebar
+# ─────────────────────────────────────────────────────────────────────────────
+if "search_input"   not in st.session_state: st.session_state.search_input   = ""
+if "do_search"      not in st.session_state: st.session_state.do_search      = False
+if "last_query"     not in st.session_state: st.session_state.last_query     = ""
+if "search_history" not in st.session_state: st.session_state.search_history = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2.  GLOBAL CSS
+# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=Lato:wght@300;400;700&display=swap');
 
-/* ── Tokens ── */
+/* ── Design tokens ── */
 :root {
-  --ink:       #0a0a0f;
-  --ink2:      #2c2c3a;
-  --ink3:      #72728a;
-  --bg:        #f7f7fc;
-  --bg2:       #efeff6;
-  --bg3:       #e6e6f0;
-  --white:     #ffffff;
-  --gold:      #c9a84c;
-  --gold-d:    #8a6a1f;
-  --gold-l:    #fdf3dc;
-  --teal:      #0d7a63;
-  --teal-l:    #d5f0ea;
-  --red:       #b03030;
-  --red-l:     #fce8e8;
-  --blue:      #1d5db5;
-  --blue-l:    #deeafb;
-  --border:    rgba(10,10,15,.09);
-  --border-md: rgba(10,10,15,.17);
-  --r:         10px;
-  --r-lg:      18px;
-  --mono:      'DM Mono', monospace;
-  --head:      'Syne', sans-serif;
-  --body:      'Lato', sans-serif;
-  --shadow-sm: 0 1px 4px rgba(10,10,15,.06);
-  --shadow-md: 0 4px 20px rgba(10,10,15,.09);
-  --shadow-lg: 0 12px 40px rgba(10,10,15,.13);
+  --ink:        #0a0a0f;
+  --ink2:       #2c2c3a;
+  --ink3:       #72728a;
+  --bg:         #f4f4f9;
+  --bg2:        #ecedf4;
+  --bg3:        #e2e3ed;
+  --white:      #ffffff;
+  --gold:       #c9a84c;
+  --gold-d:     #7d5f10;
+  --gold-l:     #fdf3dc;
+  --teal:       #0d7a63;
+  --teal-l:     #d5f0ea;
+  --blue:       #1d5db5;
+  --blue-l:     #deeafb;
+  --border:     rgba(10,10,15,.08);
+  --border-md:  rgba(10,10,15,.14);
+  --border-str: rgba(10,10,15,.24);
+  --r:          10px;
+  --r-lg:       16px;
+  --r-xl:       22px;
+  --mono:       'DM Mono', monospace;
+  --head:       'Syne', sans-serif;
+  --body:       'Lato', sans-serif;
+  --sh-sm:      0 1px 3px rgba(10,10,15,.06);
+  --sh-md:      0 4px 18px rgba(10,10,15,.09);
+  --sh-lg:      0 12px 40px rgba(10,10,15,.13);
 }
 
-/* ── Reset + global ── */
-*, *::before, *::after { box-sizing: border-box; }
-html, body, [class*="css"] { font-family: var(--body) !important; background: var(--bg) !important; }
+/* ── Global reset ── */
+*, *::before, *::after  { box-sizing: border-box; }
+html, body, [class*="css"] {
+  font-family: var(--body) !important;
+  background:  var(--bg)   !important;
+}
 #MainMenu, footer, header { visibility: hidden; }
-.block-container { padding: 1.5rem 2rem 4rem !important; max-width: 1300px; }
+.block-container { padding: 1.8rem 2.4rem 5rem !important; max-width: 1280px; }
 
-/* ── Sidebar ── */
+/* ── Equal-height card columns ──────────────────────────────────────────────
+   Chain of flex-column rules from the Streamlit column wrapper right down
+   to .mkt-card so every card in a row stretches to the same height and the
+   CTA button is always visually anchored to the card bottom.              */
+[data-testid="stHorizontalBlock"]           { align-items: stretch !important; }
+[data-testid="stColumn"]                    { display: flex !important; flex-direction: column !important; }
+[data-testid="stColumn"] > div              { flex: 1 !important; display: flex !important; flex-direction: column !important; }
+[data-testid="stColumn"] > div > div        { flex: 1 !important; display: flex !important; flex-direction: column !important; }
+[data-testid="stColumn"] .element-container { flex: 1 !important; display: flex !important; flex-direction: column !important; }
+[data-testid="stColumn"] .element-container > div { flex: 1 !important; }
+
+/* ── Sidebar ────────────────────────────────────────────────────────────── */
 [data-testid="stSidebar"] {
-  background: var(--ink) !important;
-  border-right: none !important;
+  background:   #0e0e16 !important;
+  border-right: 0.5px solid rgba(255,255,255,.07) !important;
 }
-[data-testid="stSidebar"] * { color: rgba(255,255,255,.82) !important; }
+[data-testid="stSidebar"] > div { padding-top: .4rem !important; }
+[data-testid="stSidebar"] *     { color: rgba(255,255,255,.80) !important; }
+[data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 {
-  font-family: var(--head) !important;
-  color: #fff !important;
-  font-weight: 700 !important;
-}
-[data-testid="stSidebar"] .stSlider [data-baseweb="slider"] div[role="slider"] {
-  background-color: var(--gold) !important;
-}
-[data-testid="stSidebar"] input {
-  background: rgba(255,255,255,.08) !important;
-  border-color: rgba(255,255,255,.18) !important;
-  color: #fff !important;
+[data-testid="stSidebar"] h3    { color: #fff !important; font-family: var(--head) !important; font-weight: 700 !important; }
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] textarea {
+  background:  rgba(255,255,255,.07) !important;
+  border:      0.5px solid rgba(255,255,255,.15) !important;
+  color:       #fff !important;
   border-radius: var(--r) !important;
 }
-[data-testid="stSidebar"] [data-baseweb="select"] div {
-  background: rgba(255,255,255,.08) !important;
-  border-color: rgba(255,255,255,.18) !important;
-  color: #fff !important;
+[data-testid="stSidebar"] [data-baseweb="select"] > div:first-child {
+  background:    rgba(255,255,255,.07) !important;
+  border:        0.5px solid rgba(255,255,255,.15) !important;
+  border-radius: var(--r) !important;
 }
-[data-testid="stSidebar"] label { color: rgba(255,255,255,.6) !important; font-size: 11px !important; text-transform: uppercase; letter-spacing: .8px; }
-[data-testid="stSidebar"] .stCheckbox label { color: rgba(255,255,255,.82) !important; font-size: 13px !important; text-transform: none; letter-spacing: 0; }
-
-/* ── Text input ── */
-[data-testid="stTextInput"] input {
-  font-family: var(--head) !important;
-  font-size: 17px !important;
-  font-weight: 600 !important;
-  background: var(--white) !important;
-  border: 1.5px solid var(--border-md) !important;
-  border-radius: 100px !important;
-  padding: .75rem 1.4rem !important;
-  box-shadow: var(--shadow-sm);
-  transition: border-color .2s, box-shadow .2s;
-}
-[data-testid="stTextInput"] input:focus {
-  border-color: var(--gold) !important;
-  box-shadow: 0 0 0 4px rgba(201,168,76,.14) !important;
-}
-[data-testid="stTextInput"] input::placeholder { color: var(--ink3) !important; font-weight: 400; font-size: 15px !important; }
-[data-testid="stTextInput"] > label { display: none !important; }
-
-/* ── Primary button ── */
-.stButton > button {
-  font-family: var(--head) !important;
-  font-weight: 700 !important;
-  font-size: 14px !important;
-  letter-spacing: .5px;
-  background: var(--ink) !important;
-  color: #fff !important;
-  border: none !important;
-  border-radius: 100px !important;
-  padding: .7rem 1.6rem !important;
-  transition: transform .15s, background .2s, box-shadow .2s !important;
-  box-shadow: var(--shadow-md) !important;
-}
-.stButton > button:hover {
-  background: var(--ink2) !important;
-  transform: translateY(-1px) !important;
-  box-shadow: var(--shadow-lg) !important;
-}
-.stButton > button:active { transform: scale(.97) !important; }
-
-/* ── Metric overrides ── */
-[data-testid="metric-container"] {
-  background: var(--white);
-  border: 0.5px solid var(--border-md);
-  border-radius: var(--r-lg);
-  padding: 1rem 1.2rem !important;
-  box-shadow: var(--shadow-sm);
-}
-[data-testid="metric-container"] label {
-  font-family: var(--mono) !important;
-  font-size: 10px !important;
+[data-testid="stSidebar"] [data-baseweb="select"] span { color: #fff !important; }
+[data-testid="stSidebar"] [role="slider"]              { background: var(--gold) !important; }
+[data-testid="stSidebar"] label {
+  color:          rgba(255,255,255,.40) !important;
+  font-family:    var(--mono) !important;
+  font-size:      10px !important;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: var(--ink3) !important;
+}
+[data-testid="stSidebar"] .stCheckbox label,
+[data-testid="stSidebar"] .stToggle   label {
+  color:          rgba(255,255,255,.82) !important;
+  font-family:    var(--body) !important;
+  font-size:      13px !important;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ── Search bar ─────────────────────────────────────────────────────────── */
+[data-testid="stTextInput"] input {
+  font-family:  var(--head)  !important;
+  font-size:    16px         !important;
+  font-weight:  600          !important;
+  background:   var(--white) !important;
+  border:       1.5px solid var(--border-md) !important;
+  border-radius:100px        !important;
+  padding:      .8rem 1.5rem !important;
+  height:       52px         !important;
+  box-shadow:   var(--sh-sm);
+  transition:   border-color .2s, box-shadow .2s;
+}
+[data-testid="stTextInput"] input:focus {
+  border-color: var(--gold)  !important;
+  box-shadow:   0 0 0 4px rgba(201,168,76,.14), var(--sh-sm) !important;
+  outline:      none !important;
+}
+[data-testid="stTextInput"] input::placeholder {
+  color:       var(--ink3) !important;
+  font-weight: 400;
+  font-size:   14px !important;
+}
+[data-testid="stTextInput"] > label { display: none !important; }
+
+/* ── Chip buttons (6-column row) ─────────────────────────────────────────
+   CSS :has() is supported in Chrome 105+, Firefox 121+, Safari 15.4+.
+   We target any horizontal block that contains at least 6 child columns.  */
+[data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(6)) .stButton > button {
+  background:    var(--white)      !important;
+  color:         var(--ink2)       !important;
+  border:        0.5px solid var(--border-md) !important;
+  border-radius: 100px             !important;
+  font-family:   var(--mono)       !important;
+  font-size:     11.5px            !important;
+  font-weight:   500               !important;
+  letter-spacing: 0                !important;
+  padding:       .45rem .8rem      !important;
+  box-shadow:    var(--sh-sm)      !important;
+  transition:    background .15s, border-color .15s, color .15s,
+                 transform .15s, box-shadow .15s  !important;
+  white-space:   nowrap !important;
+}
+[data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(6)) .stButton > button:hover {
+  background:    var(--bg2)        !important;
+  border-color:  var(--border-str) !important;
+  color:         var(--ink)        !important;
+  transform:     translateY(-1px)  !important;
+  box-shadow:    var(--sh-md)      !important;
+}
+[data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(6)) .stButton > button:active {
+  transform: scale(.96) !important;
+}
+
+/* ── Scout CTA button (2-column search row) ──────────────────────────────
+   Targets the horizontal block that has exactly 2 columns.               */
+[data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(2):last-child) .stButton > button {
+  background:    var(--ink)        !important;
+  color:         #fff              !important;
+  border:        none              !important;
+  border-radius: 100px             !important;
+  font-family:   var(--head)       !important;
+  font-size:     14px              !important;
+  font-weight:   700               !important;
+  letter-spacing:.4px              !important;
+  padding:       .8rem 1.4rem      !important;
+  height:        52px              !important;
+  box-shadow:    var(--sh-md)      !important;
+  transition:    background .2s, transform .15s, box-shadow .2s !important;
+}
+[data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(2):last-child) .stButton > button:hover {
+  background: var(--ink2)   !important;
+  transform:  translateY(-1px) !important;
+  box-shadow: var(--sh-lg)  !important;
+}
+[data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(2):last-child) .stButton > button:active {
+  transform: scale(.97) !important;
+}
+
+/* ── Metric tiles ────────────────────────────────────────────────────────── */
+[data-testid="metric-container"] {
+  background:    var(--white);
+  border:        0.5px solid var(--border-md);
+  border-radius: var(--r-lg);
+  padding:       1.1rem 1.3rem !important;
+  box-shadow:    var(--sh-sm);
+}
+[data-testid="metric-container"] label {
+  font-family:    var(--mono) !important;
+  font-size:      9.5px !important;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color:          var(--ink3) !important;
 }
 [data-testid="stMetricValue"] {
   font-family: var(--head) !important;
-  font-size: 1.55rem !important;
+  font-size:   1.5rem !important;
   font-weight: 800 !important;
-  color: var(--ink) !important;
+  color:       var(--ink) !important;
 }
-[data-testid="stMetricDelta"] { font-family: var(--mono) !important; font-size: 11px !important; }
+[data-testid="stMetricDelta"]     { font-family: var(--mono) !important; font-size: 10.5px !important; }
 [data-testid="stMetricDeltaIcon"] { display: none; }
 
-/* ── Marketplace card ── */
+/* ── Marketplace card ────────────────────────────────────────────────────── */
 .mkt-card {
-  background: var(--white);
-  border: 0.5px solid var(--border-md);
-  border-radius: var(--r-lg);
-  overflow: hidden;
-  box-shadow: var(--shadow-sm);
-  transition: transform .22s cubic-bezier(.25,.8,.25,1), box-shadow .22s;
-  height: 100%;
-  display: flex;
+  background:     var(--white);
+  border:         0.5px solid var(--border-md);
+  border-radius:  var(--r-xl);
+  overflow:       hidden;
+  box-shadow:     var(--sh-sm);
+  transition:     transform .22s cubic-bezier(.25,.8,.25,1),
+                  box-shadow .22s, border-color .22s;
+  display:        flex;
   flex-direction: column;
+  height:         100%;          /* fills the stretched column */
 }
 .mkt-card:hover {
-  transform: translateY(-4px) scale(1.01);
-  box-shadow: var(--shadow-lg);
+  transform:    translateY(-4px);
+  box-shadow:   var(--sh-lg);
+  border-color: var(--border-str);
 }
 .card-header {
-  padding: 1.3rem 1.3rem .9rem;
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  padding:       1.2rem 1.25rem 1rem;
+  display:       flex;
+  align-items:   flex-start;
+  gap:           12px;
   border-bottom: 0.5px solid var(--border);
 }
 .platform-icon {
-  width: 48px; height: 48px;
+  width: 46px; height: 46px;
   border-radius: 12px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 22px;
-  flex-shrink: 0;
+  font-size: 21px; flex-shrink: 0;
   background: var(--bg2);
-  border: 0.5px solid var(--border);
+  border: 0.5px solid var(--border-md);
 }
 .card-title-block { flex: 1; min-width: 0; }
 .platform-name {
-  font-family: var(--head);
-  font-size: 15.5px; font-weight: 700;
-  color: var(--ink); letter-spacing: -.2px;
+  font-family:   var(--head);
+  font-size:     15px; font-weight: 700;
+  color:         var(--ink); letter-spacing: -.2px;
   margin-bottom: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .platform-category {
-  font-family: var(--mono);
-  font-size: 10px; color: var(--ink3);
+  font-family:    var(--mono);
+  font-size:      9.5px; color: var(--ink3);
   text-transform: uppercase; letter-spacing: .8px;
 }
 .trust-badge {
-  font-family: var(--mono);
-  font-size: 10px; font-weight: 500;
-  padding: 3px 8px;
-  border-radius: 100px;
+  font-family:  var(--mono);
+  font-size:    9.5px; font-weight: 500;
+  padding:      3px 9px; border-radius: 100px;
+  white-space:  nowrap; flex-shrink: 0;
 }
-.card-body { padding: .9rem 1.3rem; flex: 1; }
-.listing-count {
-  font-family: var(--mono); font-size: 11.5px;
-  color: var(--ink3); margin-bottom: 8px;
+/* card-body has flex:1 so it expands and pushes card-footer to the bottom */
+.card-body {
+  padding:        .9rem 1.25rem .7rem;
+  flex:           1;
+  display:        flex;
+  flex-direction: column;
+  gap:            7px;
 }
+.listing-count { font-family: var(--mono); font-size: 11px; color: var(--ink3); }
 .listing-count b { color: var(--ink); font-weight: 500; }
-.tag-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.tag-row { display: flex; gap: 5px; flex-wrap: wrap; }
 .tag {
-  font-family: var(--mono); font-size: 10.5px; font-weight: 500;
-  padding: 3px 9px; border-radius: 100px;
+  font-family: var(--mono); font-size: 10px; font-weight: 500;
+  padding: 2px 8px; border-radius: 100px;
   background: var(--bg2); border: 0.5px solid var(--border-md);
   color: var(--ink2);
 }
-.tag.green  { background: var(--teal-l); color: var(--teal); border-color: rgba(13,122,99,.18); }
-.tag.gold   { background: var(--gold-l); color: var(--gold-d); border-color: rgba(201,168,76,.25); }
-.tag.blue   { background: var(--blue-l); color: var(--blue); border-color: rgba(29,93,181,.18); }
+.tag.green { background: var(--teal-l); color: var(--teal);   border-color: rgba(13,122,99,.2); }
+.tag.gold  { background: var(--gold-l); color: var(--gold-d); border-color: rgba(201,168,76,.28); }
+.tag.blue  { background: var(--blue-l); color: var(--blue);   border-color: rgba(29,93,181,.2); }
 .price-estimate {
-  font-family: var(--head); font-size: 14px; font-weight: 700;
-  color: var(--ink); margin-top: 6px;
+  font-family: var(--head); font-size: 13.5px; font-weight: 700;
+  color: var(--ink);
 }
-.price-estimate span { font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--ink3); margin-left: 4px; }
-.card-footer { padding: .9rem 1.3rem 1.1rem; }
+.price-estimate span {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 400;
+  color: var(--ink3); margin-left: 4px;
+}
+.card-tip {
+  font-size: 12px; color: var(--ink3);
+  line-height: 1.55;
+  margin-top: auto;   /* pushes tip to bottom of card-body */
+  padding-top: 4px;
+}
+/* card-footer is always visually at the bottom because card-body has flex:1 */
+.card-footer {
+  padding:    .8rem 1.25rem 1.1rem;
+  border-top: 0.5px solid var(--border);
+}
 .view-btn {
-  display: flex; align-items: center; justify-content: center; gap: 7px;
-  width: 100%;
-  padding: 11px 0;
-  border-radius: 100px;
+  display:         flex;
+  align-items:     center;
+  justify-content: center;
+  gap:             7px;
+  width:           100%;
+  padding:         10px 0;
+  border-radius:   100px;
   text-decoration: none !important;
-  font-family: var(--head);
-  font-size: 13.5px; font-weight: 700;
-  letter-spacing: .3px;
-  transition: filter .18s, transform .15s, box-shadow .18s;
-  box-shadow: var(--shadow-sm);
+  font-family:     var(--head);
+  font-size:       13px; font-weight: 700;
+  letter-spacing:  .3px;
+  box-shadow:      var(--sh-sm);
+  transition:      filter .18s, transform .15s, box-shadow .18s;
 }
-.view-btn:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: var(--shadow-md); }
+.view-btn:hover  { filter: brightness(1.09); transform: translateY(-1px); box-shadow: var(--sh-md); }
 .view-btn:active { transform: scale(.97); }
-.view-btn .arrow { opacity: .7; font-size: 12px; transition: transform .15s; }
-.view-btn:hover .arrow { transform: translateX(3px); opacity: 1; }
+.view-btn .arr   { opacity: .65; font-size: 11px; transition: transform .15s, opacity .15s; }
+.view-btn:hover .arr { transform: translateX(3px); opacity: 1; }
 
-/* ── Verdict strip ── */
+/* ── Verdict strip ───────────────────────────────────────────────────────── */
 .verdict-strip {
   display: flex; align-items: center; gap: 10px;
   background: var(--white);
   border: 0.5px solid var(--border-md);
   border-radius: 100px;
-  padding: 10px 18px;
-  margin: .6rem 0 1.4rem;
-  box-shadow: var(--shadow-sm);
+  padding: 9px 18px;
+  margin: .7rem 0 1.5rem;
+  box-shadow: var(--sh-sm);
   flex-wrap: wrap;
 }
-.verdict-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-.verdict-text { font-family: var(--head); font-size: 13.5px; font-weight: 700; color: var(--ink); }
-.verdict-sub  { font-family: var(--mono); font-size: 11px; color: var(--ink3); }
+.verdict-dot  { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.verdict-text { font-family: var(--head); font-size: 13px; font-weight: 700; color: var(--ink); }
+.verdict-sub  { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); }
 
-/* ── Section label ── */
-.section-eyebrow {
+/* ── Section labels ─────────────────────────────────────────────────────── */
+.eyebrow {
   font-family: var(--mono); font-size: 10px;
   text-transform: uppercase; letter-spacing: 2px;
-  color: var(--gold);
-  margin-bottom: 4px;
+  color: var(--gold); margin-bottom: 3px;
 }
 h2.section-title {
-  font-family: var(--head) !important; font-size: 1.7rem !important;
+  font-family: var(--head) !important; font-size: 1.6rem !important;
   font-weight: 800 !important; letter-spacing: -.5px;
   color: var(--ink) !important; margin: 0 0 1rem 0 !important;
 }
+.chips-label {
+  font-family: var(--mono); font-size: 9.5px;
+  text-transform: uppercase; letter-spacing: 1.5px;
+  color: var(--ink3); margin-bottom: 6px;
+}
 
-/* ── Hero ── */
+/* ── Hero bar ────────────────────────────────────────────────────────────── */
 .hero-bar {
   display: flex; align-items: center; gap: 14px;
-  margin-bottom: 2rem;
-  padding-bottom: 1.4rem;
+  padding-bottom: 1.5rem; margin-bottom: 1.8rem;
   border-bottom: 0.5px solid var(--border-md);
 }
 .logo-mark {
-  width: 42px; height: 42px; border-radius: 12px;
-  background: var(--ink); display: flex; align-items: center;
-  justify-content: center; font-size: 20px; flex-shrink: 0;
-  box-shadow: var(--shadow-md);
+  width: 44px; height: 44px; border-radius: 12px;
+  background: var(--ink);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 21px; flex-shrink: 0; box-shadow: var(--sh-md);
 }
 .brand-name {
-  font-family: var(--head); font-size: 1.5rem;
+  font-family: var(--head); font-size: 1.45rem;
   font-weight: 800; letter-spacing: -1px; color: var(--ink);
 }
 .brand-name em { font-style: normal; color: var(--gold); }
-.brand-tag {
-  font-family: var(--mono); font-size: 11px;
-  color: var(--ink3); margin-top: 1px;
-}
+.brand-sub     { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); margin-top: 1px; }
 .beta-pill {
-  font-family: var(--mono); font-size: 9.5px; font-weight: 500;
+  font-family: var(--mono); font-size: 9px; font-weight: 500;
   background: var(--gold-l); color: var(--gold-d);
-  border: 0.5px solid rgba(201,168,76,.3);
-  padding: 3px 9px; border-radius: 100px; margin-left: 4px;
+  border: 0.5px solid rgba(201,168,76,.35);
+  padding: 2px 8px; border-radius: 100px;
+  margin-left: 6px; vertical-align: middle;
 }
 
-/* ── Expander ── */
+/* ── Sidebar section dividers ────────────────────────────────────────────── */
+.sb-section {
+  font-family:    var(--mono); font-size: 9px;
+  text-transform: uppercase; letter-spacing: 1.5px;
+  color:          rgba(255,255,255,.30);
+  padding:        .9rem 0 .35rem;
+  border-top:     0.5px solid rgba(255,255,255,.07);
+  margin-top:     .3rem;
+}
+
+/* ── Expander ────────────────────────────────────────────────────────────── */
 [data-testid="stExpander"] {
   border: 0.5px solid var(--border-md) !important;
   border-radius: var(--r-lg) !important;
-  background: var(--white) !important;
-  box-shadow: var(--shadow-sm) !important;
+  background: var(--white)  !important;
+  box-shadow: var(--sh-sm)  !important;
 }
 [data-testid="stExpander"] summary {
   font-family: var(--head) !important; font-weight: 700 !important;
-  font-size: 14.5px !important; color: var(--ink) !important;
+  font-size: 14px !important; color: var(--ink) !important;
 }
 
-/* ── History pills ── */
-.history-row { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 1.2rem; }
-.history-pill {
-  font-family: var(--mono); font-size: 11.5px;
-  background: var(--white); border: 0.5px solid var(--border-md);
-  color: var(--ink2); padding: 5px 13px; border-radius: 100px;
-  cursor: pointer; transition: background .15s;
-  box-shadow: var(--shadow-sm); text-decoration: none;
-}
-.history-pill:hover { background: var(--bg2); }
-
-/* ── Divider ── */
-hr.scout-div {
-  border: none; border-top: 0.5px solid var(--border-md);
-  margin: 1.8rem 0;
-}
-
-/* ── Empty state ── */
-.empty-wrap {
-  text-align: center; padding: 5rem 2rem;
-}
-.empty-icon { font-size: 3.5rem; margin-bottom: 1rem; line-height: 1; }
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.empty-wrap { text-align: center; padding: 4.5rem 2rem; }
+.empty-icon  { font-size: 3.5rem; margin-bottom: 1rem; line-height: 1; }
 .empty-title {
   font-family: var(--head); font-size: 1.6rem; font-weight: 800;
   color: var(--ink); letter-spacing: -.5px; margin-bottom: .5rem;
 }
-.empty-sub { font-size: 14.5px; color: var(--ink3); max-width: 420px; margin: 0 auto; line-height: 1.7; }
-.suggest-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 1.4rem; }
-.suggest-chip {
-  font-family: var(--mono); font-size: 12px;
-  background: var(--white); border: 0.5px solid var(--border-md);
-  color: var(--ink2); padding: 6px 14px; border-radius: 100px;
-  box-shadow: var(--shadow-sm);
+.empty-sub {
+  font-size: 14px; color: var(--ink3);
+  max-width: 400px; margin: 0 auto; line-height: 1.75;
 }
+
+/* ── Misc ────────────────────────────────────────────────────────────────── */
+hr.scout-div { border: none; border-top: 0.5px solid var(--border-md); margin: 1.8rem 0; }
+[data-testid="stAlert"] { border-radius: var(--r-lg) !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2.  CORE DATA STRUCTURES
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.  DATA MODEL  — unchanged
+# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class Platform:
-    """
-    Describes one marketplace card. All URLs are dynamically constructed
-    from the user's query — no hardcoded product links anywhere.
-    """
-    name:         str         # display name
-    icon:         str         # emoji used as the brand icon
-    category:     str         # short descriptor e.g. "General Marketplace"
-    search_url:   str         # dynamically built live search URL
-    trust_label:  str         # e.g. "Buyer Protection"
-    trust_color:  str         # CSS class for the trust badge
-    button_bg:    str         # hex for the CTA button background
-    button_fg:    str         # hex for the CTA button text
-    tags:         list[str]   # feature tags shown on the card
-    tag_styles:   list[str]   # matching CSS class per tag ("green" / "gold" / "blue" / "")
-    price_note:   str         # short note next to estimated price
-    est_listings: str         # simulated listing count string
-    notes:        str         # one-line tip shown in the card body
+    name:         str
+    icon:         str
+    category:     str
+    search_url:   str
+    trust_label:  str
+    trust_color:  str
+    button_bg:    str
+    button_fg:    str
+    tags:         list[str]
+    tag_styles:   list[str]
+    price_note:   str
+    est_listings: str
+    notes:        str
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3.  DYNAMIC URL BUILDER
-#     Each URL uses the user's exact query — safely percent-encoded.
-#     Changing the query re-builds every URL automatically.
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 4.  REGION CONFIG
+#     Drives URL selection + currency symbol for eBay / Amazon / Google.
+#     All other platforms use global URLs (they handle localisation themselves).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_REGION_CFG: dict[str, dict] = {
+    "🌍 Global": {
+        "ebay":   "https://www.ebay.com/sch/i.html?_nkw={q_plus}&_sop=10",
+        "amazon": "https://www.amazon.com/s?k={q_plus}&ref=nb_sb_noss",
+        "google": "https://www.google.com/search?tbm=shop&q={q_plus}",
+        "sym":    "$",
+    },
+    "🇺🇸 United States": {
+        "ebay":   "https://www.ebay.com/sch/i.html?_nkw={q_plus}&_sop=10",
+        "amazon": "https://www.amazon.com/s?k={q_plus}&ref=nb_sb_noss",
+        "google": "https://www.google.com/search?tbm=shop&q={q_plus}",
+        "sym":    "$",
+    },
+    "🇬🇧 United Kingdom": {
+        "ebay":   "https://www.ebay.co.uk/sch/i.html?_nkw={q_plus}&_sop=10",
+        "amazon": "https://www.amazon.co.uk/s?k={q_plus}",
+        "google": "https://www.google.co.uk/search?tbm=shop&q={q_plus}",
+        "sym":    "£",
+    },
+    "🇪🇺 Europe": {
+        "ebay":   "https://www.ebay.de/sch/i.html?_nkw={q_plus}&_sop=10",
+        "amazon": "https://www.amazon.de/s?k={q_plus}",
+        "google": "https://www.google.de/search?tbm=shop&q={q_plus}",
+        "sym":    "€",
+    },
+    "🇦🇺 Australia": {
+        "ebay":   "https://www.ebay.com.au/sch/i.html?_nkw={q_plus}&_sop=10",
+        "amazon": "https://www.amazon.com.au/s?k={q_plus}",
+        "google": "https://www.google.com.au/search?tbm=shop&q={q_plus}",
+        "sym":    "A$",
+    },
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.  URL BUILDER  — unchanged
+# ─────────────────────────────────────────────────────────────────────────────
 
 def build_search_url(template: str, query: str) -> str:
     """
-    Safely encode `query` and interpolate it into `template`.
-
-    The template uses {q} for URL-encoded (spaces → %20) and
-    {q_plus} for plus-encoded (spaces → +) variants — different
-    platforms expect different encoding styles.
-
-    >>> build_search_url("https://www.ebay.com/sch/i.html?_nkw={q_plus}", "vintage rolex")
-    'https://www.ebay.com/sch/i.html?_nkw=vintage+rolex'
+    Safely encode `query` and interpolate into `template`.
+    {q}      → %20-style percent-encoding
+    {q_plus} → +-style encoding (used by eBay, Amazon, etc.)
     """
-    q        = urllib.parse.quote(query)          # %20-style
-    q_plus   = urllib.parse.quote_plus(query)     # +-style
+    q      = urllib.parse.quote(query)
+    q_plus = urllib.parse.quote_plus(query)
     return template.format(q=q, q_plus=q_plus)
 
 
-def get_platforms(query: str) -> list[Platform]:
-    """
-    Return the full list of Platform objects, each with a live
-    search URL built from the user's query.
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.  SMART SUGGESTION CHIPS
+#     Each tuple: (emoji, short display label, full query string to fire)
+#     Six chips → 6-column layout → targeted by the chip CSS rule above.
+# ─────────────────────────────────────────────────────────────────────────────
 
-    To add a new marketplace: copy one block below, change the fields
-    and the search_url template. Nothing else needs to change.
+CHIPS: list[tuple[str, str, str]] = [
+    ("⌚", "Vintage Rolex",    "Vintage Rolex Submariner"),
+    ("💻", "MacBook Pro M3",   "MacBook Pro M3"),
+    ("👟", "Jordan 1 Chicago", "Air Jordan 1 Chicago"),
+    ("🪑", "Eames Chair",      "Eames Lounge Chair"),
+    ("👜", "Birkin 30",        "Hermès Birkin 30 Togo"),
+    ("📷", "Leica M11",        "Leica M11"),
+]
+
+
+def _fire_chip(query_text: str) -> None:
     """
+    Pre-populate the search bar and arm the search flag.
+    Because the text_input uses key='search_input', setting
+    st.session_state.search_input here updates the widget on the next render.
+    st.rerun() is called by the caller immediately after this.
+    """
+    st.session_state.search_input = query_text
+    st.session_state.do_search    = True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7.  PLATFORM CATALOGUE
+#     Region-aware for eBay / Amazon / Google Shopping.
+#     filter_empty appends an eBay condition filter (cosmetic for MVP).
+#     All other platform URLs are unchanged from v1.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_platforms(query: str,
+                  region: str       = "🌍 Global",
+                  filter_empty: bool = False) -> list[Platform]:
+    cfg      = _REGION_CFG.get(region, _REGION_CFG["🌍 Global"])
+    ebay_tpl = cfg["ebay"] + ("&LH_ItemCondition=3000" if filter_empty else "")
+
+    def u(tpl: str) -> str:
+        return build_search_url(tpl, query)
+
     return [
-        # ── General marketplaces ──────────────────────────────────────────
+        # ── General ──────────────────────────────────────────────────────────
         Platform(
-            name        = "eBay",
-            icon        = "🛍️",
-            category    = "General Marketplace",
-            search_url  = build_search_url(
-                "https://www.ebay.com/sch/i.html?_nkw={q_plus}&_sop=10", query),
-            trust_label = "Buyer Protection",
-            trust_color = "green",
-            button_bg   = "#E53238",
-            button_fg   = "#ffffff",
-            tags        = ["Auction & Buy Now", "Global Sellers", "Buyer Protection"],
-            tag_styles  = ["", "gold", "green"],
-            price_note  = "incl. auction + BIN",
-            est_listings= "Millions of listings",
-            notes       = "Sort by 'Newly Listed' for freshest inventory.",
+            name         = "eBay",
+            icon         = "🛍️",
+            category     = "General Marketplace",
+            search_url   = u(ebay_tpl),
+            trust_label  = "Buyer Protection",
+            trust_color  = "green",
+            button_bg    = "#E53238",
+            button_fg    = "#ffffff",
+            tags         = ["Auction & Buy Now", "Global Sellers", "Buyer Protection"],
+            tag_styles   = ["", "gold", "green"],
+            price_note   = "auction + BIN",
+            est_listings = "Millions of listings" if not filter_empty else "Verified listings",
+            notes        = "Sort by 'Newly Listed' to surface the freshest inventory.",
         ),
         Platform(
-            name        = "Amazon",
-            icon        = "📦",
-            category    = "General Marketplace",
-            search_url  = build_search_url(
-                "https://www.amazon.com/s?k={q_plus}&ref=nb_sb_noss", query),
-            trust_label = "A-to-Z Guarantee",
-            trust_color = "green",
-            button_bg   = "#FF9900",
-            button_fg   = "#0a0a0f",
-            tags        = ["Prime Shipping", "New & Used", "A-to-Z Guarantee"],
-            tag_styles  = ["blue", "", "green"],
-            price_note  = "new + marketplace",
-            est_listings= "Extensive catalogue",
-            notes       = "Filter by 'Used' under 'Condition' for best deals.",
+            name         = "Amazon",
+            icon         = "📦",
+            category     = "General Marketplace",
+            search_url   = u(cfg["amazon"]),
+            trust_label  = "A-to-Z Guarantee",
+            trust_color  = "green",
+            button_bg    = "#FF9900",
+            button_fg    = "#0a0a0f",
+            tags         = ["Prime Shipping", "New & Used", "A-to-Z Guarantee"],
+            tag_styles   = ["blue", "", "green"],
+            price_note   = "new + marketplace",
+            est_listings = "Extensive catalogue",
+            notes        = "Filter by 'Used' under Condition for the best deals.",
         ),
         Platform(
-            name        = "Google Shopping",
-            icon        = "🔍",
-            category    = "Price Comparison",
-            search_url  = build_search_url(
-                "https://www.google.com/search?tbm=shop&q={q_plus}", query),
-            trust_label = "Price Comparison",
-            trust_color = "blue",
-            button_bg   = "#4285F4",
-            button_fg   = "#ffffff",
-            tags        = ["Cross-retailer", "Price History", "Local availability"],
-            tag_styles  = ["blue", "gold", ""],
-            price_note  = "across all retailers",
-            est_listings= "All major retailers",
-            notes       = "Use 'Price drop' filter to catch recent reductions.",
+            name         = "Google Shopping",
+            icon         = "🔍",
+            category     = "Price Comparison",
+            search_url   = u(cfg["google"]),
+            trust_label  = "Price Comparison",
+            trust_color  = "blue",
+            button_bg    = "#4285F4",
+            button_fg    = "#ffffff",
+            tags         = ["Cross-retailer", "Price History", "Local availability"],
+            tag_styles   = ["blue", "gold", ""],
+            price_note   = "across all retailers",
+            est_listings = "All major retailers",
+            notes        = "Use the 'Price drop' filter to surface recent reductions.",
         ),
-
-        # ── Specialist / collectibles ─────────────────────────────────────
+        # ── Specialist / collectibles ─────────────────────────────────────────
         Platform(
-            name        = "Chrono24",
-            icon        = "⌚",
-            category    = "Watches & Timepieces",
-            search_url  = build_search_url(
-                "https://www.chrono24.com/search/index.htm?dosearch=true&query={q_plus}", query),
-            trust_label = "Escrow Service",
-            trust_color = "green",
-            button_bg   = "#1A1A2E",
-            button_fg   = "#ffffff",
-            tags        = ["Verified Dealers", "Escrow Payments", "14-day Return"],
-            tag_styles  = ["green", "green", ""],
-            price_note  = "dealer + private",
-            est_listings= "500,000+ watches",
-            notes       = "Filter by 'Trusted Seller' for authenticated pieces.",
+            name         = "Chrono24",
+            icon         = "⌚",
+            category     = "Watches & Timepieces",
+            search_url   = u("https://www.chrono24.com/search/index.htm?dosearch=true&query={q_plus}"),
+            trust_label  = "Escrow Service",
+            trust_color  = "green",
+            button_bg    = "#1A1A2E",
+            button_fg    = "#ffffff",
+            tags         = ["Verified Dealers", "Escrow Payments", "14-day Return"],
+            tag_styles   = ["green", "green", ""],
+            price_note   = "dealer + private",
+            est_listings = "500,000+ watches",
+            notes        = "Filter by 'Trusted Seller' for fully authenticated pieces.",
         ),
         Platform(
-            name        = "StockX",
-            icon        = "👟",
-            category    = "Sneakers, Cards & Collectibles",
-            search_url  = build_search_url(
-                "https://stockx.com/search?s={q_plus}", query),
-            trust_label = "Authenticated",
-            trust_color = "green",
-            button_bg   = "#08A05C",
-            button_fg   = "#ffffff",
-            tags        = ["100% Authenticated", "Live Bids & Asks", "Price Tracking"],
-            tag_styles  = ["green", "blue", "gold"],
-            price_note  = "last sale price",
-            est_listings= "Authenticated resale",
-            notes       = "Check 'Price History' chart before bidding.",
+            name         = "StockX",
+            icon         = "👟",
+            category     = "Sneakers, Cards & Collectibles",
+            search_url   = u("https://stockx.com/search?s={q_plus}"),
+            trust_label  = "Authenticated",
+            trust_color  = "green",
+            button_bg    = "#08A05C",
+            button_fg    = "#ffffff",
+            tags         = ["100% Authenticated", "Live Bids & Asks", "Price Tracking"],
+            tag_styles   = ["green", "blue", "gold"],
+            price_note   = "last sale price",
+            est_listings = "Authenticated resale",
+            notes        = "Check the Price History chart before placing a bid.",
         ),
         Platform(
-            name        = "Grailed",
-            icon        = "👔",
-            category    = "Designer & Streetwear",
-            search_url  = build_search_url(
-                "https://www.grailed.com/search?query={q_plus}", query),
-            trust_label = "Community Vetted",
-            trust_color = "blue",
-            button_bg   = "#C8102E",
-            button_fg   = "#ffffff",
-            tags        = ["Peer-to-peer", "Offer Accepted", "Community Curated"],
-            tag_styles  = ["", "gold", "blue"],
-            price_note  = "peer-to-peer",
-            est_listings= "9M+ listings",
-            notes       = "Most sellers accept offers — try 10–15% below asking.",
+            name         = "Grailed",
+            icon         = "👔",
+            category     = "Designer & Streetwear",
+            search_url   = u("https://www.grailed.com/search?query={q_plus}"),
+            trust_label  = "Community Vetted",
+            trust_color  = "blue",
+            button_bg    = "#C8102E",
+            button_fg    = "#ffffff",
+            tags         = ["Peer-to-peer", "Offer Accepted", "Community Curated"],
+            tag_styles   = ["", "gold", "blue"],
+            price_note   = "peer-to-peer",
+            est_listings = "9M+ listings",
+            notes        = "Most sellers accept offers — try 10–15% below asking price.",
         ),
         Platform(
-            name        = "Vestiaire Collective",
-            icon        = "👜",
-            category    = "Luxury Pre-owned Fashion",
-            search_url  = build_search_url(
-                "https://www.vestiairecollective.com/search/?q={q_plus}", query),
-            trust_label = "Authentication",
-            trust_color = "green",
-            button_bg   = "#2E2E2E",
-            button_fg   = "#f0d98c",
-            tags        = ["Physical Auth Check", "Luxury Focus", "Global Community"],
-            tag_styles  = ["green", "gold", ""],
-            price_note  = "authenticated pre-owned",
-            est_listings= "Curated luxury",
-            notes       = "Items ship to Vestiaire first for physical inspection.",
+            name         = "Vestiaire Collective",
+            icon         = "👜",
+            category     = "Luxury Pre-owned Fashion",
+            search_url   = u("https://www.vestiairecollective.com/search/?q={q_plus}"),
+            trust_label  = "Authentication",
+            trust_color  = "green",
+            button_bg    = "#2E2E2E",
+            button_fg    = "#f0d98c",
+            tags         = ["Physical Auth Check", "Luxury Focus", "Global Community"],
+            tag_styles   = ["green", "gold", ""],
+            price_note   = "authenticated pre-owned",
+            est_listings = "Curated luxury",
+            notes        = "Items are physically inspected by Vestiaire before shipping.",
         ),
         Platform(
-            name        = "Depop",
-            icon        = "🌿",
-            category    = "Vintage & Streetwear",
-            search_url  = build_search_url(
-                "https://www.depop.com/search/?q={q_plus}", query),
-            trust_label = "Buyer Protection",
-            trust_color = "blue",
-            button_bg   = "#FF2300",
-            button_fg   = "#ffffff",
-            tags        = ["Vintage Gems", "Gen-Z Sellers", "Buyer Protection"],
-            tag_styles  = ["gold", "", "blue"],
-            price_note  = "individual sellers",
-            est_listings= "30M+ items",
-            notes       = "Prices are negotiable — DM sellers directly.",
+            name         = "Depop",
+            icon         = "🌿",
+            category     = "Vintage & Streetwear",
+            search_url   = u("https://www.depop.com/search/?q={q_plus}"),
+            trust_label  = "Buyer Protection",
+            trust_color  = "blue",
+            button_bg    = "#FF2300",
+            button_fg    = "#ffffff",
+            tags         = ["Vintage Gems", "Gen-Z Sellers", "Buyer Protection"],
+            tag_styles   = ["gold", "", "blue"],
+            price_note   = "individual sellers",
+            est_listings = "30M+ items",
+            notes        = "Prices are negotiable — DM the seller directly.",
         ),
         Platform(
-            name        = "1stDibs",
-            icon        = "🪑",
-            category    = "Antiques & Designer Furniture",
-            search_url  = build_search_url(
-                "https://www.1stdibs.com/search/all/?q={q_plus}", query),
-            trust_label = "Trade-vetted",
-            trust_color = "gold",
-            button_bg   = "#B8972E",
-            button_fg   = "#ffffff",
-            tags        = ["Trade Vetted", "Antiques & Art", "White Glove Shipping"],
-            tag_styles  = ["gold", "gold", "green"],
-            price_note  = "dealer asking price",
-            est_listings= "High-end curated",
-            notes       = "Prices are negotiable — most dealers quote on request.",
+            name         = "1stDibs",
+            icon         = "🪑",
+            category     = "Antiques & Designer Furniture",
+            search_url   = u("https://www.1stdibs.com/search/all/?q={q_plus}"),
+            trust_label  = "Trade-vetted",
+            trust_color  = "gold",
+            button_bg    = "#B8972E",
+            button_fg    = "#ffffff",
+            tags         = ["Trade Vetted", "Antiques & Art", "White Glove Shipping"],
+            tag_styles   = ["gold", "gold", "green"],
+            price_note   = "dealer asking price",
+            est_listings = "High-end curated",
+            notes        = "Most dealers quote on request — prices are always negotiable.",
         ),
         Platform(
-            name        = "Reddit",
-            icon        = "🔖",
-            category    = "Community Classifieds",
-            search_url  = build_search_url(
-                "https://www.reddit.com/search/?q={q_plus}+%28for+sale+OR+FS+OR+WTS%29&type=link", query),
-            trust_label = "Community",
-            trust_color = "blue",
-            button_bg   = "#FF4500",
-            button_fg   = "#ffffff",
-            tags        = ["No Fees", "r/Watchexchange", "r/Smarthome etc."],
-            tag_styles  = ["green", "", "blue"],
-            price_note  = "peer-to-peer, no fees",
-            est_listings= "Niche subreddits",
-            notes       = "Search niche subreddits directly for better results.",
+            name         = "Reddit",
+            icon         = "🔖",
+            category     = "Community Classifieds",
+            search_url   = u("https://www.reddit.com/search/?q={q_plus}+%28for+sale+OR+FS+OR+WTS%29&type=link"),
+            trust_label  = "Community",
+            trust_color  = "blue",
+            button_bg    = "#FF4500",
+            button_fg    = "#ffffff",
+            tags         = ["No Fees", "Niche Subreddits", "Direct from Seller"],
+            tag_styles   = ["green", "", "blue"],
+            price_note   = "peer-to-peer, no fees",
+            est_listings = "Niche subreddits",
+            notes        = "Search category-specific subreddits directly for better results.",
         ),
         Platform(
-            name        = "Facebook Marketplace",
-            icon        = "📍",
-            category    = "Local & National",
-            search_url  = build_search_url(
-                "https://www.facebook.com/marketplace/search?query={q_plus}", query),
-            trust_label = "Local Pickup",
-            trust_color = "blue",
-            button_bg   = "#1877F2",
-            button_fg   = "#ffffff",
-            tags        = ["Local Pickup", "No Fees", "Negotiate Direct"],
-            tag_styles  = ["", "green", ""],
-            price_note  = "local market price",
-            est_listings= "Hyper-local results",
-            notes       = "Best for bulky items — local pickup avoids shipping costs.",
+            name         = "Facebook Marketplace",
+            icon         = "📍",
+            category     = "Local & National",
+            search_url   = u("https://www.facebook.com/marketplace/search?query={q_plus}"),
+            trust_label  = "Local Pickup",
+            trust_color  = "blue",
+            button_bg    = "#1877F2",
+            button_fg    = "#ffffff",
+            tags         = ["Local Pickup", "No Fees", "Negotiate Direct"],
+            tag_styles   = ["", "green", ""],
+            price_note   = "local market price",
+            est_listings = "Hyper-local results",
+            notes        = "Best for bulky items — local pickup avoids all shipping costs.",
         ),
         Platform(
-            name        = "Catawiki",
-            icon        = "🏺",
-            category    = "Curated Auctions",
-            search_url  = build_search_url(
-                "https://www.catawiki.com/en/s#q={q_plus}", query),
-            trust_label = "Expert Curated",
-            trust_color = "gold",
-            button_bg   = "#6B2D8B",
-            button_fg   = "#ffffff",
-            tags        = ["Expert-curated", "Weekly Auctions", "Rare & Special"],
-            tag_styles  = ["gold", "blue", "gold"],
-            price_note  = "auction hammer price",
-            est_listings= "Curated auctions",
-            notes       = "Register 24h before closing to place last-minute bids.",
+            name         = "Catawiki",
+            icon         = "🏺",
+            category     = "Curated Auctions",
+            search_url   = u("https://www.catawiki.com/en/s#q={q_plus}"),
+            trust_label  = "Expert Curated",
+            trust_color  = "gold",
+            button_bg    = "#6B2D8B",
+            button_fg    = "#ffffff",
+            tags         = ["Expert-curated", "Weekly Auctions", "Rare & Special"],
+            tag_styles   = ["gold", "blue", "gold"],
+            price_note   = "auction hammer price",
+            est_listings = "Curated specialist auctions",
+            notes        = "Register 24 h before closing to place last-minute bids.",
         ),
     ]
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 4.  PRICE INTELLIGENCE ENGINE
-#     Derives a baseline estimate from the query string so the "Average Market
-#     Price" metric always shows something meaningful.
-#     No API keys. No hardcoded lists. Pure signal-based inference.
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 8.  PRICE INTELLIGENCE ENGINE  — unchanged
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Keyword → (base_price, price_spread_factor)
-# base_price       : estimated median market price (GBP)
-# spread_factor    : how wide the realistic price band is (0.3 = ±30%)
 _PRICE_SIGNALS: list[tuple[list[str], float, float]] = [
-    # Ultra-luxury watches & jewellery
-    (["patek philippe", "patek", "nautilus", "pp 5711"],          32_000, 0.45),
-    (["audemars piguet", "ap royal oak", "audemars"],             22_000, 0.45),
-    (["richard mille", "rm 011", "rm011"],                        120_000, 0.55),
-    (["vacheron", "vacheron constantin"],                          18_000, 0.4),
-    # Rolex & prestige
-    (["rolex daytona", "daytona"],                                 18_000, 0.45),
-    (["rolex submariner", "submariner"],                           10_500, 0.35),
-    (["rolex gmt", "gmt master"],                                  12_000, 0.35),
-    (["rolex datejust", "datejust"],                               7_200,  0.35),
-    (["rolex", "tudor black bay"],                                  7_000, 0.4),
-    # Other prestige watches
-    (["omega speedmaster", "speedmaster"],                         4_800,  0.35),
-    (["omega seamaster", "seamaster"],                             3_200,  0.35),
-    (["omega", "tag heuer", "iwc", "jaeger"],                     3_500,  0.35),
-    (["cartier tank", "cartier santos", "cartier"],                4_200,  0.4),
-    # Sneakers — hype
-    (["jordan 1 chicago", "jordan 1 bred", "jordan 1 royal"],     550,    0.30),
-    (["jordan 4 travis", "jordan 4 off white"],                    850,    0.35),
-    (["yeezy 350 zebra", "yeezy 350 v2"],                          280,    0.3),
-    (["air jordan 1", "jordan 1"],                                 280,    0.35),
-    (["nike dunk low", "dunk low"],                                180,    0.3),
-    (["air force 1", "af1"],                                       120,    0.25),
-    (["yeezy", "adidas yeezy"],                                    250,    0.35),
-    (["new balance 550", "new balance 2002"],                      140,    0.3),
-    # Designer fashion
-    (["hermès birkin", "birkin 25", "birkin 30", "birkin 35"],     18_000, 0.45),
-    (["hermès kelly", "kelly bag"],                                 12_000, 0.45),
-    (["chanel classic flap", "chanel 2.55"],                       7_500,  0.35),
-    (["louis vuitton neverfull", "lv neverfull"],                   1_100,  0.3),
-    (["gucci diana", "gucci horsebit"],                            1_400,  0.35),
-    (["supreme box logo", "box logo hoodie", "bogo"],              850,    0.45),
-    (["stone island", "stone island shadow"],                       420,    0.35),
-    (["balenciaga triple s", "triple s"],                          480,    0.35),
-    # Electronics
-    (["macbook pro m3", "macbook pro m2"],                         1_800,  0.2),
-    (["macbook air m2", "macbook air m3"],                         1_050,  0.2),
-    (["iphone 15 pro max", "iphone 15 pro"],                       1_050,  0.15),
-    (["iphone 14 pro", "iphone 13 pro"],                           650,    0.15),
-    (["sony a7r v", "sony a7 iv"],                                  2_400,  0.2),
-    (["leica q2", "leica m11", "leica"],                           4_800,  0.3),
-    (["playstation 5", "ps5"],                                      480,    0.12),
-    (["nintendo switch oled", "nintendo switch"],                   260,    0.12),
-    # Art & antiques
-    (["first edition", "first printing", "signed copy"],           350,    0.65),
-    (["banksy", "basquiat", "kaws original"],                      28_000, 0.6),
-    (["warhol", "hirst spot print"],                               4_500,  0.55),
-    (["vintage poster", "original poster"],                         280,    0.55),
-    # Furniture
-    (["eames lounge chair", "eames chair"],                         4_200,  0.4),
-    (["knoll barcelona chair", "barcelona chair"],                  5_500,  0.4),
-    (["vitra", "hay furniture", "herman miller"],                   1_200,  0.4),
+    (["patek philippe", "nautilus", "pp 5711"],              32_000, 0.45),
+    (["audemars piguet", "ap royal oak"],                    22_000, 0.45),
+    (["richard mille", "rm 011"],                           120_000, 0.55),
+    (["vacheron constantin"],                                18_000, 0.40),
+    (["rolex daytona", "daytona"],                           18_000, 0.45),
+    (["rolex submariner", "submariner"],                     10_500, 0.35),
+    (["rolex gmt", "gmt master"],                            12_000, 0.35),
+    (["rolex datejust", "datejust"],                          7_200, 0.35),
+    (["rolex", "tudor black bay"],                            7_000, 0.40),
+    (["omega speedmaster", "speedmaster"],                    4_800, 0.35),
+    (["omega seamaster", "seamaster"],                        3_200, 0.35),
+    (["omega", "tag heuer", "iwc", "jaeger"],                 3_500, 0.35),
+    (["cartier tank", "cartier santos", "cartier"],           4_200, 0.40),
+    (["jordan 1 chicago", "jordan 1 bred"],                     550, 0.30),
+    (["jordan 4 travis", "jordan 4 off white"],                 850, 0.35),
+    (["yeezy 350 zebra", "yeezy 350 v2"],                       280, 0.30),
+    (["air jordan 1", "jordan 1"],                              280, 0.35),
+    (["nike dunk low", "dunk low"],                             180, 0.30),
+    (["air force 1", "af1"],                                    120, 0.25),
+    (["yeezy", "adidas yeezy"],                                 250, 0.35),
+    (["new balance 550", "new balance 2002"],                   140, 0.30),
+    (["hermès birkin", "birkin 25", "birkin 30", "birkin 35"],18_000, 0.45),
+    (["hermès kelly", "kelly bag"],                           12_000, 0.45),
+    (["chanel classic flap", "chanel 2.55"],                   7_500, 0.35),
+    (["louis vuitton neverfull", "lv neverfull"],              1_100, 0.30),
+    (["gucci diana", "gucci horsebit"],                        1_400, 0.35),
+    (["supreme box logo", "box logo hoodie"],                    850, 0.45),
+    (["stone island"],                                           420, 0.35),
+    (["balenciaga triple s"],                                    480, 0.35),
+    (["macbook pro m3", "macbook pro m2"],                     1_800, 0.20),
+    (["macbook air m2", "macbook air m3"],                     1_050, 0.20),
+    (["iphone 15 pro max", "iphone 15 pro"],                   1_050, 0.15),
+    (["iphone 14 pro", "iphone 13 pro"],                         650, 0.15),
+    (["sony a7r v", "sony a7 iv"],                             2_400, 0.20),
+    (["leica q2", "leica m11", "leica"],                       4_800, 0.30),
+    (["playstation 5", "ps5"],                                   480, 0.12),
+    (["nintendo switch oled", "nintendo switch"],                260, 0.12),
+    (["first edition", "signed copy"],                           350, 0.65),
+    (["banksy", "basquiat", "kaws"],                          28_000, 0.60),
+    (["warhol", "hirst spot print"],                           4_500, 0.55),
+    (["vintage poster", "original poster"],                      280, 0.55),
+    (["eames lounge chair", "eames chair"],                    4_200, 0.40),
+    (["barcelona chair", "knoll barcelona"],                   5_500, 0.40),
+    (["vitra", "hay furniture", "herman miller"],              1_200, 0.40),
 ]
 
-_DEFAULT_BASE = 320.0
+_DEFAULT_BASE   = 320.0
 _DEFAULT_SPREAD = 0.40
 
 
 def _estimate_price(query: str) -> tuple[float, float, float]:
-    """
-    Return (low, mid, high) price estimates for `query`.
-
-    Algorithm
-    ---------
-    1. Scan _PRICE_SIGNALS for keyword matches in the lowercase query.
-    2. Use the first (most-specific) match found.
-    3. Derive a deterministic ±spread using a hash of the query so the
-       numbers are stable across re-renders but vary between queries.
-    4. If no keyword matches, use _DEFAULT_BASE with a wide spread.
-
-    The hash-based jitter means repeated searches for "Vintage Rolex"
-    always return the same range — it won't flicker on re-render.
-    """
+    """Derive (low, mid, high) price estimates — logic unchanged from v1."""
     q = query.lower().strip()
-
-    base   = _DEFAULT_BASE
-    spread = _DEFAULT_SPREAD
-
+    base, spread = _DEFAULT_BASE, _DEFAULT_SPREAD
     for keywords, b, s in _PRICE_SIGNALS:
         if any(kw in q for kw in keywords):
-            base   = b
-            spread = s
+            base, spread = b, s
             break
-
-    # Deterministic jitter seeded on the query string (stable per query)
-    h = int(hashlib.md5(q.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF  # 0.0–1.0
-    jitter = 0.88 + h * 0.24          # range 0.88 – 1.12
-
-    mid  = base * jitter
-    low  = mid  * (1 - spread * 0.7)
-    high = mid  * (1 + spread * 0.9)
-
+    h      = int(hashlib.md5(q.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    jitter = 0.88 + h * 0.24
+    mid    = base * jitter
+    low    = mid  * (1 - spread * 0.7)
+    high   = mid  * (1 + spread * 0.9)
     return round(low, -1), round(mid, -1), round(high, -1)
 
 
-def _fmt_price(p: float) -> str:
-    """Format a price as £ with comma thousands-separator, no pence."""
-    return f"£{p:,.0f}"
+def _fmt_price(p: float, sym: str = "£") -> str:
+    return f"{sym}{p:,.0f}"
 
 
 def _price_verdict(query: str) -> tuple[str, str, str]:
-    """
-    Return (dot_color_css, label, sub) for the verdict strip.
-    Varies by spread width — wider spread = more uncertainty.
-    """
     q = query.lower()
     for keywords, _, spread in _PRICE_SIGNALS:
         if any(kw in q for kw in keywords):
             if spread <= 0.20:
-                return "#2d9e7a", "Tight market", "Prices are consistent — limited negotiation room."
+                return "#2d9e7a", "Tight market",    "Consistent pricing — limited negotiation room."
             elif spread <= 0.35:
-                return "#c9a84c", "Active market", "Moderate price variance — room to find value."
+                return "#c9a84c", "Active market",   "Moderate variance — value deals are findable."
             else:
-                return "#b03030", "Volatile market", "Wide price spread — research comps before buying."
-    return "#c9a84c", "Exploratory search", "Limited price data — check multiple platforms."
+                return "#b03030", "Volatile market", "Wide spread — research comparables carefully."
+    return "#c9a84c", "Exploratory search", "Limited data — cross-reference multiple platforms."
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 5.  CARD RENDERER
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 9.  PLATFORM VISIBILITY + SORT  — logic unchanged
+# ─────────────────────────────────────────────────────────────────────────────
 
-def render_platform_card(p: Platform, low: float, high: float) -> None:
-    """Render a single marketplace card as self-contained HTML."""
+_GENERAL      = {"eBay", "Amazon", "Google Shopping"}
+_COLLECTIBLES = {"Chrono24", "StockX"}
+_FASHION      = {"Grailed", "Vestiaire Collective", "Depop", "1stDibs"}
+_LOCAL        = {"Reddit", "Facebook Marketplace"}
+_AUCTIONS     = {"Catawiki"}
 
-    # Build tag HTML
-    tag_html = "".join(
-        f'<span class="tag {style}">{label}</span>'
-        for label, style in zip(p.tags, p.tag_styles)
-    )
 
-    # Trust badge inline style depends on colour key
-    badge_styles = {
+def _platform_visible(p: Platform, show_general: bool, show_collectibles: bool,
+                       show_fashion: bool, show_local: bool, show_auctions: bool) -> bool:
+    if p.name in _GENERAL      and not show_general:      return False
+    if p.name in _COLLECTIBLES and not show_collectibles:  return False
+    if p.name in _FASHION      and not show_fashion:       return False
+    if p.name in _LOCAL        and not show_local:         return False
+    if p.name in _AUCTIONS     and not show_auctions:      return False
+    return True
+
+
+def _sorted_platforms(platforms: list[Platform], sort_order: str) -> list[Platform]:
+    if sort_order == "Alphabetical":
+        return sorted(platforms, key=lambda p: p.name)
+    if sort_order == "Most Listings First":
+        def _score(p: Platform) -> int:
+            nums = re.findall(r"[\d,]+", p.est_listings)
+            return int(nums[0].replace(",", "")) if nums else 0
+        return sorted(platforms, key=_score, reverse=True)
+    return platforms   # Recommended
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. CARD RENDERER
+#     The card-footer CTA button is always flush to the bottom of the card
+#     because:  column div → flex-column → card-body has flex:1 →
+#               card-footer is last child → visually anchored at bottom.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _badge_style(color: str) -> str:
+    return {
         "green": "background:#d5f0ea;color:#0d7a63;border:0.5px solid rgba(13,122,99,.2)",
-        "gold":  "background:#fdf3dc;color:#8a6a1f;border:0.5px solid rgba(201,168,76,.3)",
+        "gold":  "background:#fdf3dc;color:#7d5f10;border:0.5px solid rgba(201,168,76,.28)",
         "blue":  "background:#deeafb;color:#1d5db5;border:0.5px solid rgba(29,93,181,.2)",
-    }
-    badge_style = badge_styles.get(p.trust_color, badge_styles["blue"])
+    }.get(color, "background:#ecedf4;color:#2c2c3a;border:0.5px solid rgba(10,10,15,.14)")
 
-    # Price range
-    price_range = f"{_fmt_price(low)} – {_fmt_price(high)}"
+
+def render_platform_card(p: Platform, low: float, high: float, sym: str = "£") -> None:
+    tag_html    = "".join(f'<span class="tag {s}">{l}</span>' for l, s in zip(p.tags, p.tag_styles))
+    price_range = f"{_fmt_price(low, sym)} – {_fmt_price(high, sym)}"
 
     st.markdown(f"""
     <div class="mkt-card">
@@ -774,145 +916,102 @@ def render_platform_card(p: Platform, low: float, high: float) -> None:
           <div class="platform-name">{p.name}</div>
           <div class="platform-category">{p.category}</div>
         </div>
-        <span class="trust-badge" style="{badge_style}">{p.trust_label}</span>
+        <span class="trust-badge" style="{_badge_style(p.trust_color)}">{p.trust_label}</span>
       </div>
-
       <div class="card-body">
         <div class="listing-count">{p.est_listings}</div>
         <div class="tag-row">{tag_html}</div>
-        <div style="font-size:12px;color:var(--ink3);line-height:1.6;margin-bottom:8px">
-          {p.notes}
-        </div>
-        <div class="price-estimate">
-          {price_range}
-          <span>est. {p.price_note}</span>
-        </div>
+        <div class="price-estimate">{price_range}<span>est. {p.price_note}</span></div>
+        <div class="card-tip">{p.notes}</div>
       </div>
-
       <div class="card-footer">
         <a href="{p.search_url}" target="_blank" rel="noopener noreferrer"
-           class="view-btn"
-           style="background:{p.button_bg};color:{p.button_fg}">
-          Search {p.name}
-          <span class="arrow">→</span>
+           class="view-btn" style="background:{p.button_bg};color:{p.button_fg}">
+          Search {p.name} <span class="arr">→</span>
         </a>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 6.  SESSION STATE
-# ──────────────────────────────────────────────────────────────────────────────
-if "search_history" not in st.session_state:
-    st.session_state.search_history: list[str] = []
-if "last_query" not in st.session_state:
-    st.session_state.last_query: str = ""
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. SIDEBAR  — premium SaaS settings panel
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 7.  SIDEBAR
-# ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
+
     st.markdown("""
-    <div style="padding:1.2rem 0 1rem">
-      <div style="font-family:'Syne',sans-serif;font-size:1.5rem;font-weight:800;
+    <div style="padding:.5rem 0 1.1rem">
+      <div style="font-family:'Syne',sans-serif;font-size:1.35rem;font-weight:800;
                   letter-spacing:-1px;color:#fff;line-height:1">
         Nexus<span style="color:#c9a84c">Scout</span>
       </div>
-      <div style="font-family:'DM Mono',monospace;font-size:10px;
-                  color:rgba(255,255,255,.45);margin-top:4px;letter-spacing:1px;
-                  text-transform:uppercase">
-        Universal Search Engine
+      <div style="font-family:'DM Mono',monospace;font-size:9px;letter-spacing:1px;
+                  text-transform:uppercase;color:rgba(255,255,255,.3);margin-top:3px">
+        AI Personal Shopper
       </div>
     </div>
-    <div style="height:0.5px;background:rgba(255,255,255,.1);margin-bottom:1.4rem"></div>
     """, unsafe_allow_html=True)
 
-    st.markdown("## Filters")
+    # ── SEARCH SETTINGS ──────────────────────────────────────────────────────
+    st.markdown('<div class="sb-section">Search Settings</div>', unsafe_allow_html=True)
 
-    # ── Platform toggles ──────────────────────────────────────────────────
-    st.markdown("""
-    <div style="font-family:'DM Mono',monospace;font-size:10px;color:rgba(255,255,255,.45);
-                text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">
-      Show platforms
-    </div>
-    """, unsafe_allow_html=True)
+    region = st.selectbox(
+        "Target Region",
+        options = list(_REGION_CFG.keys()),
+        index   = 0,
+        help    = "Adapts eBay, Amazon, and Google URLs to the selected market.",
+    )
 
-    show_general      = st.checkbox("General Marketplaces",   value=True)
+    filter_empty = st.toggle(
+        "Filter Out Empty Listings",
+        value = False,
+        help  = "Appends a condition filter to eBay to hide listings without images.",
+    )
+
+    # ── PLATFORMS ────────────────────────────────────────────────────────────
+    st.markdown('<div class="sb-section">Show Platforms</div>', unsafe_allow_html=True)
+
+    show_general      = st.checkbox("General Marketplaces",     value=True)
     show_collectibles = st.checkbox("Specialist / Collectibles", value=True)
-    show_fashion      = st.checkbox("Fashion & Streetwear",   value=True)
-    show_local        = st.checkbox("Local & Community",      value=True)
-    show_auctions     = st.checkbox("Auctions",               value=True)
+    show_fashion      = st.checkbox("Fashion & Streetwear",      value=True)
+    show_local        = st.checkbox("Local & Community",         value=True)
+    show_auctions     = st.checkbox("Auctions",                  value=True)
 
-    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+    # ── DISPLAY ──────────────────────────────────────────────────────────────
+    st.markdown('<div class="sb-section">Display</div>', unsafe_allow_html=True)
 
     sort_order = st.selectbox(
         "Sort platforms by",
         ["Recommended", "Alphabetical", "Most Listings First"],
     )
 
-    st.markdown("""
-    <hr style="border:none;border-top:0.5px solid rgba(255,255,255,.1);margin:1.2rem 0">
-    <div style="font-family:'DM Mono',monospace;font-size:10px;color:rgba(255,255,255,.35);
-                line-height:1.9;text-transform:uppercase;letter-spacing:.8px">
-      All links open live<br>search results pages.<br>
-      No hardcoded URLs.
-    </div>
-    """, unsafe_allow_html=True)
-
+    # ── SEARCH HISTORY ───────────────────────────────────────────────────────
     if st.session_state.search_history:
-        st.markdown("""
-        <div style="height:0.5px;background:rgba(255,255,255,.1);margin:1.2rem 0 .8rem"></div>
-        <div style="font-family:'DM Mono',monospace;font-size:10px;
-                    color:rgba(255,255,255,.45);text-transform:uppercase;letter-spacing:.8px;
-                    margin-bottom:.6rem">Recent searches</div>
-        """, unsafe_allow_html=True)
-        for h in reversed(st.session_state.search_history[-5:]):
+        st.markdown('<div class="sb-section">Recent Searches</div>', unsafe_allow_html=True)
+        for h in reversed(st.session_state.search_history[-6:]):
             st.markdown(
-                f'<div style="font-family:\'DM Mono\',monospace;font-size:12px;'
-                f'color:rgba(255,255,255,.65);padding:3px 0">{h}</div>',
+                f'<div style="font-family:\'DM Mono\',monospace;font-size:11px;'
+                f'color:rgba(255,255,255,.5);padding:3px 0;'
+                f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+                f'{h}</div>',
                 unsafe_allow_html=True,
             )
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 8.  PLATFORM FILTERING LOGIC
-# ──────────────────────────────────────────────────────────────────────────────
-
-_GENERAL      = {"eBay", "Amazon", "Google Shopping"}
-_COLLECTIBLES = {"Chrono24", "StockX"}
-_FASHION      = {"Grailed", "Vestiaire Collective", "Depop", "1stDibs"}
-_LOCAL        = {"Reddit", "Facebook Marketplace"}
-_AUCTIONS     = {"Catawiki"}
-
-
-def _platform_visible(p: Platform) -> bool:
-    if p.name in _GENERAL      and not show_general:      return False
-    if p.name in _COLLECTIBLES and not show_collectibles:  return False
-    if p.name in _FASHION      and not show_fashion:       return False
-    if p.name in _LOCAL        and not show_local:         return False
-    if p.name in _AUCTIONS     and not show_auctions:      return False
-    return True
+    # ── FOOTER NOTE ──────────────────────────────────────────────────────────
+    st.markdown("""
+    <div style="margin-top:2rem;font-family:'DM Mono',monospace;font-size:9px;
+                color:rgba(255,255,255,.18);line-height:2;text-transform:uppercase;
+                letter-spacing:.8px;border-top:0.5px solid rgba(255,255,255,.07);
+                padding-top:1rem">
+      All links open live<br>search results pages.<br>No hardcoded URLs.
+    </div>
+    """, unsafe_allow_html=True)
 
 
-def _sorted_platforms(platforms: list[Platform]) -> list[Platform]:
-    if sort_order == "Alphabetical":
-        return sorted(platforms, key=lambda p: p.name)
-    if sort_order == "Most Listings First":
-        # Crude proxy: put the ones with numbers in est_listings first
-        def _score(p: Platform) -> int:
-            nums = re.findall(r"[\d,]+", p.est_listings)
-            if not nums:
-                return 0
-            return int(nums[0].replace(",", ""))
-        return sorted(platforms, key=_score, reverse=True)
-    return platforms   # "Recommended" — keep authored order
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 9.  MAIN UI
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. MAIN UI
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ── Hero bar ──────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -922,78 +1021,86 @@ st.markdown("""
     <div class="brand-name">Nexus<em>Scout</em>
       <span class="beta-pill">BETA</span>
     </div>
-    <div class="brand-tag">
-      Type anything. Get live results across every major marketplace instantly.
-    </div>
+    <div class="brand-sub">Type anything. Live results across every major marketplace, instantly.</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Search bar ────────────────────────────────────────────────────────────────
+# ── Search bar + Scout button  (2 columns → CSS applies CTA style here) ───────
 search_col, btn_col = st.columns([6, 1])
 
 with search_col:
-    query = st.text_input(
-        label       = "q",
-        placeholder = "Search across the web for any product…  e.g. 'Vintage Rolex Submariner', 'Air Jordan 1 Chicago', 'Eames Lounge Chair'",
+    # key="search_input" so chip clicks can pre-populate this field
+    st.text_input(
+        label            = "search",
+        placeholder      = "Search for any product — 'Vintage Rolex', 'MacBook Pro M3', 'Eames Chair'…",
         label_visibility = "collapsed",
+        key              = "search_input",
     )
 
 with btn_col:
-    go = st.button("Scout →", use_container_width=True)
+    if st.button("Scout →", use_container_width=True, key="scout_btn"):
+        if st.session_state.search_input.strip():
+            st.session_state.do_search = True
 
-# Allow Enter-key submission (Streamlit fires on text_input change)
-triggered = go or (query.strip() and query != st.session_state.last_query and go)
+# ── Smart suggestion chips  (6 columns → CSS applies chip style here) ─────────
+st.markdown('<div class="chips-label">✦ Smart Suggestions</div>', unsafe_allow_html=True)
 
-# Also search when user hits Enter (query change + non-empty)
-if query.strip() and query.strip() != st.session_state.last_query:
-    triggered = True
+chip_cols = st.columns(len(CHIPS))
+for col, (emoji, label, full_query) in zip(chip_cols, CHIPS):
+    with col:
+        if st.button(f"{emoji}  {label}", key=f"chip_{label}", use_container_width=True):
+            _fire_chip(full_query)
+            st.rerun()   # rerun so text_input picks up the new session state value
 
-# ── History pills (quick re-search) ──────────────────────────────────────────
-if st.session_state.search_history and not query:
-    recent = list(dict.fromkeys(reversed(st.session_state.search_history)))[:6]
-    pills  = "".join(f'<span class="suggest-chip">{q}</span>' for q in recent)
-    st.markdown(
-        f'<div style="margin-top:.4rem"><span style="font-family:\'DM Mono\',sans-serif;'
-        f'font-size:10px;color:var(--ink3);text-transform:uppercase;letter-spacing:.8px;'
-        f'margin-right:8px">Recent:</span>{pills}</div>',
-        unsafe_allow_html=True,
-    )
+st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 10.  RESULTS
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. SEARCH EXECUTION
+#     Fires when:
+#       (a) Scout button clicked       → do_search = True
+#       (b) Chip clicked + rerun fires → do_search = True
+#       (c) User presses Enter         → query differs from last_query
+# ─────────────────────────────────────────────────────────────────────────────
 
-if triggered and query.strip():
+current_q = st.session_state.search_input.strip()
 
-    q = query.strip()
-    st.session_state.last_query = q
+should_search = (
+    st.session_state.do_search                                   # button / chip
+    or (current_q and current_q != st.session_state.last_query)  # Enter key
+)
 
-    # Add to history (deduplicate, keep last 20)
-    history = st.session_state.search_history
-    if q not in history:
-        history.append(q)
-    st.session_state.search_history = history[-20:]
+if should_search and current_q:
 
-    # ── Price metrics ─────────────────────────────────────────────────────
-    low, mid, high = _estimate_price(q)
-    dot_c, vlabel, vsub = _price_verdict(q)
+    # Reset flags before rendering to prevent double-fire on next rerun
+    st.session_state.do_search  = False
+    st.session_state.last_query = current_q
 
-    # Simulate a brief "thinking" delay for UX polish
-    with st.spinner(f"Scouting **{q}** across all platforms…"):
-        time.sleep(0.55)
+    # Rolling history (deduped, max 20)
+    hist = st.session_state.search_history
+    if current_q not in hist:
+        hist.append(current_q)
+    st.session_state.search_history = hist[-20:]
 
-    # ── Metric strip ──────────────────────────────────────────────────────
+    # ── Price intelligence ─────────────────────────────────────────────────
+    low, mid, high = _estimate_price(current_q)
+    dot_c, vlabel, vsub = _price_verdict(current_q)
+    sym = _REGION_CFG.get(region, _REGION_CFG["🌍 Global"])["sym"]
+
+    with st.spinner(f"Scouting **{current_q}** across all platforms…"):
+        time.sleep(0.5)
+
+    # ── Four metric tiles ──────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Est. Market Low",    _fmt_price(low),  delta="budget entry")
-    m2.metric("Est. Market Average", _fmt_price(mid), delta="median comparable")
-    m3.metric("Est. Market High",   _fmt_price(high), delta="premium examples")
+    m1.metric("Est. Market Low",     _fmt_price(low,  sym), delta="budget entry")
+    m2.metric("Est. Market Average", _fmt_price(mid,  sym), delta="median comparable")
+    m3.metric("Est. Market High",    _fmt_price(high, sym), delta="premium examples")
     m4.metric("Price Spread",
               f"{round((high - low) / mid * 100)}%",
-              delta="variance across platforms")
+              delta="variance across sources")
 
-    # ── Verdict strip ─────────────────────────────────────────────────────
+    # ── Verdict strip ──────────────────────────────────────────────────────
     st.markdown(f"""
     <div class="verdict-strip">
       <div class="verdict-dot" style="background:{dot_c}"></div>
@@ -1002,91 +1109,84 @@ if triggered and query.strip():
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Platform cards ────────────────────────────────────────────────────
-    st.markdown('<p class="section-eyebrow">Live Marketplaces</p>', unsafe_allow_html=True)
-    st.markdown(f'<h2 class="section-title">Search results for &ldquo;{q}&rdquo;</h2>',
-                unsafe_allow_html=True)
+    # ── Platform grid header ───────────────────────────────────────────────
+    st.markdown('<p class="eyebrow">Live Marketplaces</p>', unsafe_allow_html=True)
+    st.markdown(
+        f'<h2 class="section-title">Results for &ldquo;{current_q}&rdquo;</h2>',
+        unsafe_allow_html=True,
+    )
 
-    all_platforms = get_platforms(q)
-    visible       = _sorted_platforms([p for p in all_platforms if _platform_visible(p)])
+    # ── Build + filter platform list ───────────────────────────────────────
+    all_platforms = get_platforms(current_q, region, filter_empty)
+    visible = _sorted_platforms(
+        [p for p in all_platforms if _platform_visible(
+            p, show_general, show_collectibles,
+            show_fashion, show_local, show_auctions,
+        )],
+        sort_order,
+    )
 
     if not visible:
-        st.warning("All platforms are hidden — enable at least one category in the sidebar.")
+        st.warning("All platform categories are disabled. Enable at least one in the sidebar.")
     else:
-        # 3-column grid
+        # ── 3-column card grid ─────────────────────────────────────────────
         COLS = 3
-        rows = [visible[i:i+COLS] for i in range(0, len(visible), COLS)]
-        for row in rows:
+        for row in [visible[i : i + COLS] for i in range(0, len(visible), COLS)]:
             cols = st.columns(COLS, gap="medium")
             for col, platform in zip(cols, row):
                 with col:
-                    render_platform_card(platform, low, high)
-            st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+                    render_platform_card(platform, low, high, sym)
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-    # ── Intelligence expander ─────────────────────────────────────────────
+    # ── Price Intelligence expander ────────────────────────────────────────
     st.markdown('<hr class="scout-div">', unsafe_allow_html=True)
 
     with st.expander("📊  Price Intelligence & Buying Guide", expanded=False):
         g1, g2 = st.columns(2)
-
         with g1:
             st.markdown("#### Where to start")
             st.markdown(f"""
-            <div style="font-size:13.5px;color:var(--ink2);line-height:1.8">
-              <b>Best for new condition:</b> Amazon, eBay (BIN listings)<br>
-              <b>Best for price-negotiation:</b> Grailed, Facebook Marketplace, Reddit<br>
-              <b>Best for authenticity:</b> StockX, Vestiaire Collective, Chrono24<br>
-              <b>Best for rare / unique:</b> Catawiki, 1stDibs, eBay Auction<br>
-              <b>Best for price history:</b> Google Shopping, StockX
+            <div style="font-size:13px;color:var(--ink2);line-height:1.85">
+              <b>New condition:</b> Amazon, eBay (Buy It Now)<br>
+              <b>Best negotiation:</b> Grailed, Facebook Marketplace, Reddit<br>
+              <b>Authenticity first:</b> StockX, Vestiaire Collective, Chrono24<br>
+              <b>Rare &amp; unique:</b> Catawiki, 1stDibs, eBay Auction<br>
+              <b>Price history:</b> Google Shopping, StockX chart
             </div>
             """, unsafe_allow_html=True)
-
         with g2:
             st.markdown("#### Estimated price breakdown")
             st.markdown(f"""
-            <div style="font-size:13.5px;color:var(--ink2);line-height:1.8">
-              <b>Budget entry:</b> {_fmt_price(low)} — older stock, fair condition<br>
-              <b>Market median:</b> {_fmt_price(mid)} — typical example, good condition<br>
-              <b>Premium examples:</b> {_fmt_price(high)} — new/mint, full provenance<br>
-              <br>
-              <i style="color:var(--ink3);font-size:12px">
-                ⚠️ Estimates are indicative only. Always verify current
-                prices on the platform before transacting.
+            <div style="font-size:13px;color:var(--ink2);line-height:1.85">
+              <b>Budget entry:</b> {_fmt_price(low, sym)} — older stock, fair condition<br>
+              <b>Market median:</b> {_fmt_price(mid, sym)} — typical example, good condition<br>
+              <b>Premium end:</b>   {_fmt_price(high, sym)} — mint / full provenance<br><br>
+              <i style="color:var(--ink3);font-size:11.5px">
+                Estimates are indicative only. Always verify live prices before transacting.
               </i>
             </div>
             """, unsafe_allow_html=True)
-
         st.markdown("---")
         st.markdown(f"""
-        <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--ink3);line-height:1.9">
-          Query: <b style="color:var(--ink)">{q}</b> &nbsp;·&nbsp;
-          Platforms shown: <b style="color:var(--ink)">{len(visible)}</b> &nbsp;·&nbsp;
-          Generated: <b style="color:var(--ink)">{datetime.now().strftime('%H:%M:%S')}</b>
+        <div style="font-family:'DM Mono',monospace;font-size:10.5px;color:var(--ink3);line-height:2">
+          Query: <b style="color:var(--ink)">{current_q}</b> &nbsp;·&nbsp;
+          Region: <b style="color:var(--ink)">{region}</b> &nbsp;·&nbsp;
+          Platforms: <b style="color:var(--ink)">{len(visible)}</b> &nbsp;·&nbsp;
+          {datetime.now().strftime('%H:%M:%S')}
         </div>
         """, unsafe_allow_html=True)
 
-elif not query.strip():
-    # ── Empty / welcome state ─────────────────────────────────────────────
+elif not current_q:
+    # ── Welcome / empty state ──────────────────────────────────────────────
     st.markdown("""
     <div class="empty-wrap">
       <div class="empty-icon">🔭</div>
       <div class="empty-title">Scout anything, anywhere.</div>
       <div class="empty-sub">
-        Type any product into the search bar above.
-        Nexus Scout will open live search results across
-        every major marketplace simultaneously — watches, sneakers,
-        furniture, electronics, fashion, art, and more.
-      </div>
-      <div class="suggest-row">
-        <span class="suggest-chip">Vintage Rolex Submariner</span>
-        <span class="suggest-chip">Air Jordan 1 Chicago</span>
-        <span class="suggest-chip">Eames Lounge Chair</span>
-        <span class="suggest-chip">Birkin 30 Togo</span>
-        <span class="suggest-chip">Supreme Box Logo Hoodie</span>
-        <span class="suggest-chip">Sony A7R V</span>
+        Type any product above, or click a suggestion chip.
+        Nexus Scout opens live search results across every major
+        marketplace — watches, sneakers, furniture, electronics,
+        fashion, art, and beyond.
       </div>
     </div>
     """, unsafe_allow_html=True)
-
-# ── Import for datetime usage in expander ─────────────────────────────────────
-from datetime import datetime
